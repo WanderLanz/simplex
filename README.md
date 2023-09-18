@@ -10,18 +10,16 @@ simply copy [simplex.hpp] into your includes and create a matcher with the inclu
 
 - no backtracking or capture groups
 - only basic ascii (0x00-0x7F) string literal expressions
-- does not exhaust input, i.e. only matching the current stream of input.
-- special characters include R"\\!-\*+?{,}[]", in that order of precedence (escape '\\', flags "!-", quantifiers "*+?{,}", any-group "\[-\]")
-- "!" is a negation flag
+- does not exhaust input
+- special characters include R"\\!\*+?{,}[-]", in that order of precedence (escape '\\', flags "!", quantifiers "*+?{,}", any-group "\[-\]")
+- "!" is a negation flag, i.e. "! " matches any non-space character
 - '\\' escapes the next character, e.g. "\\\*" matches a literal '*'
-- '-' outside of a "[]" is a peek flag, i.e. one character lookahead
-- within "\[\]", a "-" is a range operator, e.g. "\[-az\]" matches any lowercase letter
-- within "\[\]", all ranges must precede any literals.
+- within "\[\]", all ranges "-az" must precede any literals "a".
 - within "{}", only digits or ',' is valid.
 - unlike regex, operators must precede the character or group it modifies, i.e. stack-based
-- there is a max of 255 for any quantifier, e.g. "{,255}" is valid, "{,256}" is not, because this is a toy
+- there is a max of 255 for any quantifier, e.g. "{0,255}" is valid, "{0,256}" is not
 - no predefined special character classes are provided, e.g. ".\b\B\\<\\>\c\s\S\d\D\w\W\x\O"
-- there is no guaranteed expression validation, e.g. unterminated operator sequences, malformed expressions MAY cause undefined behaviour
+- there is no guaranteed expression validation, e.g. unterminated operator sequences
 
 ## Examples
 
@@ -36,6 +34,8 @@ simply copy [simplex.hpp] into your includes and create a matcher with the inclu
 static auto simplex_ex = Sex("+[-az-AZ-09_]");
 // the Sex macro is not consteval in favor of convenience, but all of the parsing work is,
 // if you really want to, you can use simplex::parse directly to declare a constexpr matcher
+if (simplex.match("foobar")) cout << "match" << endl;
+else cout << "no match" << endl;
 }{
 ... regex = "[a-zA-Z0-9_]{20,25}";
 static auto simplex = Sex("{20,25}[-az-AZ-09_]");
