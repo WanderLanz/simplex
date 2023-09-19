@@ -25,7 +25,7 @@ namespace simplex
 {
     using uchar = unsigned char;
 
-    // simplex runtime input stream interface i.e. stack-based input
+    /// simplex runtime input stream interface i.e. stack-based input
     template <typename T>
     struct Input
     {
@@ -41,7 +41,7 @@ namespace simplex
         }
     };
 
-    // constexpr stack with a fixed size array
+    /// constexpr stack with a fixed size array
     template <size_t N>
     class Stack
     {
@@ -112,7 +112,7 @@ namespace simplex
 
     namespace internal
     {
-        // simplex operators, 1xxx xxxx, flags are 1xxx xfff
+        /// simplex operators, 1xxx xxxx, flags are 1xxx xfff
         enum : uchar
         {
             // simplex NOT operator
@@ -127,7 +127,7 @@ namespace simplex
             END_ANY,
         };
 
-        // for internal use, parse a stack of 3 characters into a single uchar
+        /// for internal use, parse a stack of 3 characters into a single uchar
         constexpr uchar stouc(const uchar (&stack)[3], size_t i)
         {
             switch (i)
@@ -143,7 +143,7 @@ namespace simplex
             }
         }
 
-        // for internal use, parsing state
+        /// for internal use, parsing state
         struct ParseState
         {
             size_t idx;
@@ -166,7 +166,7 @@ namespace simplex
             } state{NORMAL};
         };
 
-        // for internal use, parse state machine transition
+        /// for internal use, parse state machine transition
         constexpr ParseState parse_step(const std::string_view &ex, size_t idx, ParseState::S s)
         {
             uchar c = ex[idx];
@@ -276,7 +276,21 @@ namespace simplex
             }
         }
 
-        // for internal use, matching on any group
+        /// for internal use, helper function for validating no unterminated ending quantifiers
+        template <uchar c0, uchar c1, uchar c2, uchar... chars>
+        inline constexpr bool terminated_quantifier()
+        {
+            return c2 != internal::QUANTIFY;
+        }
+
+        /// for internal use, helper function for validating no ending operators
+        template <uchar c0, uchar... chars>
+        inline constexpr bool terminated()
+        {
+            return c0 < (uchar)0x80 || c0 == END_ANY;
+        }
+
+        /// for internal use, matching on any group
         template <size_t N>
         bool any(const Stack<N> &stack, size_t &any_idx, const uchar cur, uchar scur)
         { // assume we are one past the ANY operator
@@ -296,7 +310,7 @@ namespace simplex
             return false;
         }
 
-        // for internal use, matching on a quantified group
+        /// for internal use, matching on a quantified group
         template <typename T, size_t N>
         bool quantify(Input<T> &in, const uint8_t min, const uint8_t max, Stack<N> &stack, size_t &any_idx, uchar &cur, uchar &scur)
         { // assume we are one past the QUANTIFY operator
@@ -326,7 +340,7 @@ namespace simplex
             return false;
         }
 #if __cplusplus >= 202002L
-        // for internal use, just a string_view for operator""_sex
+        /// for internal use, just a string_view for operator""_sex
         template <size_t N>
         struct NotAStringView
         {
@@ -341,7 +355,7 @@ namespace simplex
 #endif
     }
 
-    // a parsed simplex expression that can be used to match against an input stream with match()
+    /// a parsed simplex expression that can be used to match against an input stream with match()
     template <size_t N>
     class Simplex
     {
@@ -354,9 +368,7 @@ namespace simplex
         explicit constexpr Simplex(const std::array<uchar, N> &stack) : stack(stack) {}
         /// for internal use, create a simplex matcher with a parsed expression's operator stack
         explicit constexpr Simplex(std::array<uchar, N> &&stack) : stack(std::move(stack)) {}
-        /**
-         * @brief match a simplex expression against an input stream
-         */
+        /// match a simplex expression against an input stream
         template <typename T>
         bool match(Input<T> &in)
         {
@@ -419,17 +431,17 @@ namespace simplex
         }
     };
 
-    // parse a simplex expression
+    /// parse a simplex expression
     template <const std::string_view &expr, size_t idx = 0, internal::ParseState::S state = internal::ParseState::NORMAL, uchar... chars>
     inline constexpr auto parse()
     {
         if constexpr (idx > expr.size())
-        {
+        { // string_view operator[] should throw out of bounds but just in case
             throw std::logic_error("malformed simplex expression");
         }
         else if constexpr (idx == expr.size())
-        {
-            if constexpr (state == internal::ParseState::NORMAL)
+        { // finished parsing, validating...
+            if constexpr (state == internal::ParseState::NORMAL && (sizeof...(chars) < 3 || internal::terminated_quantifier<chars...>()) && (sizeof...(chars) < 1 || internal::terminated<chars...>()))
             {
                 return Simplex<sizeof...(chars)>({chars...});
             }
@@ -439,7 +451,7 @@ namespace simplex
             }
         }
         else
-        {
+        { // parse the next operator/character
             constexpr internal::ParseState next_state = parse_step(expr, idx, state);
             return parse<expr, next_state.idx, next_state.state, next_state.res, chars...>();
         }

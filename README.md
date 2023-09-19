@@ -10,7 +10,7 @@ simply copy [simplex.hpp] into your includes and create a matcher with the inclu
 
 - no backtracking or capture groups
 - only basic ascii (0x00-0x7F) string literal expressions
-- does not exhaust input
+- does not exhaust input, only matches the immediate beginning of the input
 - special characters include R"\\!\*+?{,}[-]", in that order of precedence (escape '\\', flags "!", quantifiers "*+?{,}", any-group "\[-\]")
 - "!" is a negation flag, i.e. "! " matches any non-space character
 - '\\' escapes the next character, e.g. "\\\*" matches a literal '*'
@@ -19,7 +19,6 @@ simply copy [simplex.hpp] into your includes and create a matcher with the inclu
 - unlike regex, operators must precede the character or group it modifies, i.e. stack-based
 - there is a max of 255 for any quantifier, e.g. "{0,255}" is valid, "{0,256}" is not
 - no predefined special character classes are provided, e.g. ".\b\B\\<\\>\c\s\S\d\D\w\W\x\O"
-- there is no guaranteed expression validation, e.g. unterminated operator sequences
 
 ## Examples
 
