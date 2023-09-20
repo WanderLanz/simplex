@@ -8,14 +8,15 @@
 #ifndef SIMPLEX_HPP
 #define SIMPLEX_HPP
 #include <cstdint>
+#include <stdexcept>
 #include <string_view>
 #include <array>
-#include <stdexcept>
 
 #define Sex(expr) ([]() { \
     using namespace ::std::string_view_literals; \
     static constexpr ::std::string_view x = expr##sv; \
-    return ::simplex::parse<x>(); })()
+    constexpr auto matcher = ::simplex::parse<x>(); \
+    return matcher; })()
 
 /**
  * @brief A simple, comptime-parsed, stack-based, one-character lookahead regex. (Minimum Supported Version C++17)
@@ -32,16 +33,16 @@ namespace simplex
         inline void pop()
         {
             static_assert(std::is_member_function_pointer<decltype(&T::pop)>::value, "simplex::Input T must have a pop() method");
-            static_cast<T &>(*this).pop();
+            static_cast<T *>(this)->pop();
         }
         inline uchar peek()
         {
             static_assert(std::is_member_function_pointer<decltype(&T::peek)>::value, "simplex::Input T must have a peek() method");
-            return static_cast<T &>(*this).peek();
+            return static_cast<T *>(this)->peek();
         }
     };
 
-    /// constexpr stack with a fixed size array
+    /// constexpr uchar stack with a fixed size array
     template <size_t N>
     class Stack
     {
@@ -52,59 +53,59 @@ namespace simplex
         constexpr Stack() {}
         explicit constexpr Stack(const std::array<uchar, N> &l) : len(N), buf(l) {}
         explicit constexpr Stack(std::array<uchar, N> &&l) : len(N), buf(std::move(l)) {}
-        inline size_t size() const noexcept { return len; }
+        inline constexpr size_t size() const noexcept { return len; }
         static inline constexpr size_t max_size() noexcept { return N; }
-        inline bool empty() const noexcept { return len == 0; }
-        inline bool full() const noexcept { return len == N; }
-        inline void clear() noexcept { len = 0; }
-        inline void fill(const uchar v) noexcept
+        inline constexpr bool empty() const noexcept { return len == 0; }
+        inline constexpr bool full() const noexcept { return len == N; }
+        inline constexpr void clear() noexcept { len = 0; }
+        inline constexpr void fill(const uchar v) noexcept
         {
             for (size_t j = 0; j < N; ++j)
                 buf[j] = v;
             len = N;
         }
-        inline void push(const uchar c)
+        inline constexpr void push(const uchar c)
         {
             if (full())
                 throw std::runtime_error("simplex::Stack::push() overflow");
             buf[len++] = c;
         }
-        inline void push_back(const uchar c) { push(c); }
-        inline uchar &top()
+        inline constexpr void push_back(const uchar c) { push(c); }
+        inline constexpr uchar &top()
         {
             if (empty())
                 throw std::runtime_error("simplex::Stack::top() out of bounds access");
             return buf[len - 1];
         }
-        inline uchar peek() const
+        inline constexpr uchar peek() const
         {
             if (empty())
                 throw std::runtime_error("simplex::Stack::peek() out of bounds access");
             return buf[len - 1];
         }
-        inline uchar pop()
+        inline constexpr uchar pop()
         {
             if (empty())
                 throw std::runtime_error("simplex::Stack::pop() out of bounds access");
             return buf[--len];
         }
-        inline void set_len(size_t new_len)
+        inline constexpr void set_len(size_t new_len)
         {
             if (new_len > N)
                 throw std::runtime_error("simplex::Stack::set_len() overflow");
             len = new_len;
         }
-        inline void drain(size_t n_drain)
+        inline constexpr void drain(size_t n_drain)
         {
             if (n_drain > len)
                 throw std::runtime_error("simplex::Stack::drain() overflow");
             len -= n_drain;
         }
-        inline uchar &operator[](size_t idx)
+        inline constexpr uchar &operator[](size_t idx)
         {
             return buf[idx];
         }
-        inline uchar operator[](size_t idx) const
+        inline constexpr uchar operator[](size_t idx) const
         {
             return buf[idx];
         }
@@ -139,7 +140,7 @@ namespace simplex
             case 3:
                 return (stack[0] - '0') * 100 + (stack[1] - '0') * 10 + (stack[2] - '0');
             default:
-                throw std::logic_error("invalid simplex quantifier");
+                throw "invalid simplex quantifier";
             }
         }
 
@@ -212,7 +213,7 @@ namespace simplex
                 for (; i < 3 && c >= '0' && c <= '9'; (++i, ++idx, c = ex[idx]))
                     digits[i] = c;
                 if (c != ',')
-                    throw std::logic_error("malformed simplex quantifier");
+                    throw "malformed simplex quantifier";
                 return ParseState{idx + 1, (i == 0 ? (uchar)0 : stouc(digits, i)), ParseState::QUANTIFIER_RIGHT};
             }
             case ParseState::QUANTIFIER_RIGHT:
@@ -222,7 +223,7 @@ namespace simplex
                 for (; i < 3 && c >= '0' && c <= '9'; (++i, ++idx, c = ex[idx]))
                     digits[i] = c;
                 if (c != '}')
-                    throw std::logic_error("malformed simplex quantifier");
+                    throw "malformed simplex quantifier";
                 return ParseState{idx + 1, (i == 0 ? (uchar)0xFF : stouc(digits, i)), ParseState::NORMAL};
             }
             case ParseState::ANY_RANGES:
@@ -255,7 +256,7 @@ namespace simplex
                 case '\\':
                     return ParseState{idx + 2, (uchar)ex[idx + 1], ParseState::ANY_RANGE_RIGHT};
                 case ']':
-                    throw std::logic_error("malformed simplex range");
+                    throw "malformed simplex range";
                 default:
                     return ParseState{idx + 1, c, ParseState::ANY_RANGE_RIGHT};
                 }
@@ -266,28 +267,14 @@ namespace simplex
                 case '\\':
                     return ParseState{idx + 2, (uchar)ex[idx + 1], ParseState::ANY_RANGES};
                 case ']':
-                    throw std::logic_error("malformed simplex range");
+                    throw "malformed simplex range";
                 default:
                     return ParseState{idx + 1, c, ParseState::ANY_RANGES};
                 }
                 break;
             default:
-                throw std::logic_error("invalid simplex parsing state");
+                throw "invalid simplex parsing state";
             }
-        }
-
-        /// for internal use, helper function for validating no unterminated ending quantifiers
-        template <uchar c0, uchar c1, uchar c2, uchar... chars>
-        inline constexpr bool terminated_quantifier()
-        {
-            return c2 != internal::QUANTIFY;
-        }
-
-        /// for internal use, helper function for validating no ending operators
-        template <uchar c0, uchar... chars>
-        inline constexpr bool terminated()
-        {
-            return c0 < (uchar)0x80 || c0 == END_ANY;
         }
 
         /// for internal use, matching on any group
@@ -432,28 +419,23 @@ namespace simplex
     };
 
     /// parse a simplex expression
-    template <const std::string_view &expr, size_t idx = 0, internal::ParseState::S state = internal::ParseState::NORMAL, uchar... chars>
+    template <const std::string_view &expr, size_t idx = 0, internal::ParseState::S state = internal::ParseState::NORMAL, uchar... stack>
     inline constexpr auto parse()
     {
-        if constexpr (idx > expr.size())
-        { // string_view operator[] should throw out of bounds but just in case
-            throw std::logic_error("malformed simplex expression");
-        }
-        else if constexpr (idx == expr.size())
+        // should never happen because string_view indexing throws, but just in case...
+        static_assert(idx <= expr.size(), "simplex expression parsing index out of bounds, this is a bug please report it");
+        if constexpr (idx == expr.size())
         { // finished parsing, validating...
-            if constexpr (state == internal::ParseState::NORMAL && (sizeof...(chars) < 3 || internal::terminated_quantifier<chars...>()) && (sizeof...(chars) < 1 || internal::terminated<chars...>()))
-            {
-                return Simplex<sizeof...(chars)>({chars...});
-            }
-            else
-            {
-                throw std::logic_error("simplex unterminated operator sequence");
-            }
+            constexpr size_t sz = sizeof...(stack);
+            constexpr std::array<uchar, sz> arr{stack...};
+            constexpr bool is_terminated = state == internal::ParseState::NORMAL && (sz < 3 || arr[2] != internal::QUANTIFY) && (sz < 1 || (arr[0] < (uchar)0x80 || arr[0] == internal::END_ANY));
+            static_assert(is_terminated, "simplex unterminated operator sequence");
+            return Simplex<sz>(arr);
         }
         else
         { // parse the next operator/character
             constexpr internal::ParseState next_state = parse_step(expr, idx, state);
-            return parse<expr, next_state.idx, next_state.state, next_state.res, chars...>();
+            return parse<expr, next_state.idx, next_state.state, next_state.res, stack...>();
         }
     }
 }; // namespace simplex
@@ -463,7 +445,8 @@ template <::simplex::internal::NotAStringView x>
 inline auto operator""_sex()
 {
     static constexpr ::std::string_view sv{x.to_string_view()};
-    return ::simplex::parse<sv>();
+    constexpr auto matcher = ::simplex::parse<sv>();
+    return matcher;
 }
 #endif
 
