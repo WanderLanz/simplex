@@ -7,15 +7,21 @@
  */
 #ifndef SIMPLEX_HPP
 #define SIMPLEX_HPP
+#define QUANTIFY_MAX 0xFE
+#define QUANTIFY_INF 0xFF
+
 #include <cstdint>
 #include <stdexcept>
 #include <string_view>
 #include <array>
 
-#define Sex(expr) ([]() { \
+#ifndef SIMPLEX_INF
+#define SIMPLEX_INF 0x0FFF
+#endif
+#define Sex(expr) ([]() constexpr { \
     using namespace ::std::string_view_literals; \
-    static constexpr ::std::string_view x = expr##sv; \
-    constexpr auto matcher = ::simplex::parse<x>(); \
+    constexpr ::std::string_view x = expr##sv; \
+    constexpr auto matcher = ::simplex::Simplex<x.size() + 1>(x); \
     return matcher; })()
 
 /**
@@ -26,7 +32,7 @@ namespace simplex
 {
     using uchar = unsigned char;
 
-    /// simplex runtime input stream interface i.e. stack-based input
+    /// simplex runtime stack-based input interface
     template <typename T>
     struct Input
     {
@@ -42,93 +48,36 @@ namespace simplex
         }
     };
 
-    /// constexpr uchar stack with a fixed size array
-    template <size_t N>
-    class Stack
-    {
-        size_t len{0};
-        std::array<uchar, N> buf;
-
-    public:
-        constexpr Stack() {}
-        explicit constexpr Stack(const std::array<uchar, N> &l) : len(N), buf(l) {}
-        explicit constexpr Stack(std::array<uchar, N> &&l) : len(N), buf(std::move(l)) {}
-        inline constexpr size_t size() const noexcept { return len; }
-        static inline constexpr size_t max_size() noexcept { return N; }
-        inline constexpr bool empty() const noexcept { return len == 0; }
-        inline constexpr bool full() const noexcept { return len == N; }
-        inline constexpr void clear() noexcept { len = 0; }
-        inline constexpr void fill(const uchar v) noexcept
-        {
-            for (size_t j = 0; j < N; ++j)
-                buf[j] = v;
-            len = N;
-        }
-        inline constexpr void push(const uchar c)
-        {
-            if (full())
-                throw std::runtime_error("simplex::Stack::push() overflow");
-            buf[len++] = c;
-        }
-        inline constexpr void push_back(const uchar c) { push(c); }
-        inline constexpr uchar &top()
-        {
-            if (empty())
-                throw std::runtime_error("simplex::Stack::top() out of bounds access");
-            return buf[len - 1];
-        }
-        inline constexpr uchar peek() const
-        {
-            if (empty())
-                throw std::runtime_error("simplex::Stack::peek() out of bounds access");
-            return buf[len - 1];
-        }
-        inline constexpr uchar pop()
-        {
-            if (empty())
-                throw std::runtime_error("simplex::Stack::pop() out of bounds access");
-            return buf[--len];
-        }
-        inline constexpr void set_len(size_t new_len)
-        {
-            if (new_len > N)
-                throw std::runtime_error("simplex::Stack::set_len() overflow");
-            len = new_len;
-        }
-        inline constexpr void drain(size_t n_drain)
-        {
-            if (n_drain > len)
-                throw std::runtime_error("simplex::Stack::drain() overflow");
-            len -= n_drain;
-        }
-        inline constexpr uchar &operator[](size_t idx)
-        {
-            return buf[idx];
-        }
-        inline constexpr uchar operator[](size_t idx) const
-        {
-            return buf[idx];
-        }
-    };
-
     namespace internal
     {
-        /// simplex operators, 1xxx xxxx, flags are 1xxx xfff
-        enum : uchar
+        template <typename Iterator>
+        struct is_uchar_iterator : public std::bool_constant<
+                                       std::is_same<typename std::iterator_traits<Iterator>::value_type, uchar>::value &&
+                                       std::is_same<typename std::iterator_traits<Iterator>::difference_type, ptrdiff_t>::value &&
+                                       std::is_base_of<std::random_access_iterator_tag, typename std::iterator_traits<Iterator>::iterator_category>::value &&
+                                       std::is_copy_assignable<Iterator>::value>
         {
-            // simplex NOT operator
-            NOT = 0x81,
-            // simplex QUANTIFY operator
-            QUANTIFY = 0x88,
-            // simplex ANY operator
-            ANY,
-            // simplex RANGE operator
-            RANGE,
-            // simplex END_ANY operator
-            END_ANY,
         };
 
-        /// for internal use, parse a stack of 3 characters into a single uchar
+        enum : uchar
+        {
+            // reserve 0x81 - 0x87 for flags (1000 0xxx)
+            NOT = 0x81,
+            QUANTIFY = 0x88,
+            ZERO_OR_MORE,
+            ONE_OR_MORE,
+            ZERO_OR_ONE,
+            ANY,
+            RANGE,
+            END_ANY,
+            END,
+        };
+
+        inline constexpr bool test_flag(const uchar flags, uchar flag)
+        {
+            return (flags & flag) != uchar(0);
+        }
+
         constexpr uchar stouc(const uchar (&stack)[3], size_t i)
         {
             switch (i)
@@ -138,158 +87,27 @@ namespace simplex
             case 2:
                 return (stack[0] - '0') * 10 + (stack[1] - '0');
             case 3:
-                return (stack[0] - '0') * 100 + (stack[1] - '0') * 10 + (stack[2] - '0');
-            default:
-                throw "invalid simplex quantifier";
+            {
+                uint16_t res = uint16_t(stack[0] - '0') * 100 + uint16_t(stack[1] - '0') * 10 + uint16_t(stack[2] - '0');
+                if (res > uint16_t(QUANTIFY_MAX))
+                    throw std::logic_error("malformed simplex quantifier, maximum bound is 254");
+                return (uchar)res;
             }
-        }
-
-        /// for internal use, parsing state
-        struct ParseState
-        {
-            size_t idx;
-            uchar res;
-            enum S
-            {
-                NORMAL,
-                ZERO_OR_MORE_LEFT,
-                ZERO_OR_MORE_RIGHT,
-                ONE_OR_MORE_LEFT,
-                ONE_OR_MORE_RIGHT,
-                ZERO_OR_ONE_LEFT,
-                ZERO_OR_ONE_RIGHT,
-                QUANTIFIER_LEFT,
-                QUANTIFIER_RIGHT,
-                ANY_RANGES,
-                ANY_LITERALS,
-                ANY_RANGE_LEFT,
-                ANY_RANGE_RIGHT,
-            } state{NORMAL};
-        };
-
-        /// for internal use, parse state machine transition
-        constexpr ParseState parse_step(const std::string_view &ex, size_t idx, ParseState::S s)
-        {
-            uchar c = ex[idx];
-            switch (s)
-            {
-            case ParseState::NORMAL:
-                switch (c)
-                {
-                case '!':
-                    return ParseState{idx + 1, NOT, ParseState::NORMAL};
-                case '*':
-                    return ParseState{idx, QUANTIFY, ParseState::ZERO_OR_MORE_LEFT};
-                case '+':
-                    return ParseState{idx, QUANTIFY, ParseState::ONE_OR_MORE_LEFT};
-                case '?':
-                    return ParseState{idx, QUANTIFY, ParseState::ZERO_OR_ONE_LEFT};
-                case '{':
-                    return ParseState{idx + 1, QUANTIFY, ParseState::QUANTIFIER_LEFT};
-                case '[':
-                    return ParseState{idx + 1, ANY, ParseState::ANY_RANGES};
-                case '\\':
-                    return ParseState{idx + 2, (uchar)ex[idx + 1], ParseState::NORMAL};
-                default:
-                    return ParseState{idx + 1, c, ParseState::NORMAL};
-                }
-                break;
-            case ParseState::ZERO_OR_MORE_LEFT:
-                return ParseState{idx, (uchar)0, ParseState::ZERO_OR_MORE_RIGHT};
-            case ParseState::ZERO_OR_MORE_RIGHT:
-                return ParseState{idx + 1, (uchar)0xFF, ParseState::NORMAL};
-            case ParseState::ONE_OR_MORE_LEFT:
-                return ParseState{idx, (uchar)1, ParseState::ONE_OR_MORE_RIGHT};
-            case ParseState::ONE_OR_MORE_RIGHT:
-                return ParseState{idx + 1, (uchar)0xFF, ParseState::NORMAL};
-            case ParseState::ZERO_OR_ONE_LEFT:
-                return ParseState{idx, (uchar)0, ParseState::ZERO_OR_ONE_RIGHT};
-            case ParseState::ZERO_OR_ONE_RIGHT:
-                return ParseState{idx + 1, (uchar)1, ParseState::NORMAL};
-            case ParseState::QUANTIFIER_LEFT:
-            {
-                uchar digits[3]{};
-                size_t i = 0;
-                for (; i < 3 && c >= '0' && c <= '9'; (++i, ++idx, c = ex[idx]))
-                    digits[i] = c;
-                if (c != ',')
-                    throw "malformed simplex quantifier";
-                return ParseState{idx + 1, (i == 0 ? (uchar)0 : stouc(digits, i)), ParseState::QUANTIFIER_RIGHT};
-            }
-            case ParseState::QUANTIFIER_RIGHT:
-            {
-                uchar digits[3]{};
-                size_t i = 0;
-                for (; i < 3 && c >= '0' && c <= '9'; (++i, ++idx, c = ex[idx]))
-                    digits[i] = c;
-                if (c != '}')
-                    throw "malformed simplex quantifier";
-                return ParseState{idx + 1, (i == 0 ? (uchar)0xFF : stouc(digits, i)), ParseState::NORMAL};
-            }
-            case ParseState::ANY_RANGES:
-                switch (c)
-                {
-                case '-':
-                    return ParseState{idx + 1, RANGE, ParseState::ANY_RANGE_LEFT};
-                case '\\':
-                    return ParseState{idx + 2, (uchar)ex[idx + 1], ParseState::ANY_LITERALS};
-                case ']':
-                    return ParseState{idx + 1, END_ANY, ParseState::NORMAL};
-                default:
-                    return ParseState{idx + 1, c, ParseState::ANY_LITERALS};
-                }
-                break;
-            case ParseState::ANY_LITERALS:
-                switch (c)
-                {
-                case '\\':
-                    return ParseState{idx + 2, (uchar)ex[idx + 1], ParseState::ANY_LITERALS};
-                case ']':
-                    return ParseState{idx + 1, END_ANY, ParseState::NORMAL};
-                default:
-                    return ParseState{idx + 1, c, ParseState::ANY_LITERALS};
-                }
-                break;
-            case ParseState::ANY_RANGE_LEFT:
-                switch (c)
-                {
-                case '\\':
-                    return ParseState{idx + 2, (uchar)ex[idx + 1], ParseState::ANY_RANGE_RIGHT};
-                case ']':
-                    throw "malformed simplex range";
-                default:
-                    return ParseState{idx + 1, c, ParseState::ANY_RANGE_RIGHT};
-                }
-                break;
-            case ParseState::ANY_RANGE_RIGHT:
-                switch (c)
-                {
-                case '\\':
-                    return ParseState{idx + 2, (uchar)ex[idx + 1], ParseState::ANY_RANGES};
-                case ']':
-                    throw "malformed simplex range";
-                default:
-                    return ParseState{idx + 1, c, ParseState::ANY_RANGES};
-                }
-                break;
-            default:
-                throw "invalid simplex parsing state";
             }
         }
 
         /// for internal use, matching on any group
-        template <size_t N>
-        bool any(const Stack<N> &stack, size_t &any_idx, const uchar cur, uchar scur)
-        { // assume we are one past the ANY operator
-            any_idx = stack.size();
-            for (char left, right; scur == RANGE; scur = stack[--any_idx])
+        template <typename Iterator>
+        bool any(const Iterator &begin, Iterator &any_begin, const uchar cur, uchar scur)
+        { // assume we have already read ANY operator
+            any_begin = begin;
+            scur = *++any_begin;
+            for (; scur == RANGE; scur = *++any_begin)
             { // ranges are always two characters, otherwise it's malformed
-                left = stack[--any_idx];
-                right = stack[--any_idx];
-                if (cur >= left && cur <= right)
+                if (cur >= *++any_begin && cur <= *++any_begin)
                     return true;
             }
-            for (; scur != END_ANY; scur = stack[--any_idx])
+            for (; scur != END_ANY; scur = *++any_begin)
             { // everything else is a literal until END_ANY, if a range follows it's ignored
                 if (cur == scur)
                     return true;
@@ -298,154 +116,249 @@ namespace simplex
         }
 
         /// for internal use, matching on a quantified group
-        template <typename T, size_t N>
-        bool quantify(Input<T> &in, const uint8_t min, const uint8_t max, Stack<N> &stack, size_t &any_idx, uchar &cur, uchar &scur)
-        { // assume we are one past the QUANTIFY operator
-            uint8_t cnt = 0;
-            if (scur == ANY)
-            { // repeat "any" until we don't match or we reach the max
-                scur = stack.pop();
-                for (; cnt <= max; ++cnt, in.pop(), cur = in.peek())
+        template <typename Iterator, typename T>
+        bool quantify(Iterator &begin, Iterator &any_begin, Input<T> &in, uchar &cur, uchar &scur, const uint16_t min, uint16_t max)
+        { // assume we have already read QUANTIFY operator
+            scur = *++begin;
+            uint16_t cnt{0}, flags{0};
+            bool res{false};
+            if (max == uint16_t(QUANTIFY_INF))
+                max = uint16_t(SIMPLEX_INF);
+            while (cnt <= max)
+            {
+                switch (scur)
                 {
-                    if (any(stack, any_idx, cur, scur))
-                        continue;
-                    while (stack[any_idx] != internal::END_ANY)
-                        --any_idx;
-                    return (stack.set_len(any_idx + 1), cnt >= min);
+                // case FLAGS: fallthrough...
+                case NOT:
+                    flags |= scur & uchar(0x7F), scur = *++begin;
+                    continue;
+                case QUANTIFY:
+                case ZERO_OR_MORE:
+                case ONE_OR_MORE:
+                case ZERO_OR_ONE:
+                    throw std::logic_error("malformed simplex quantifier, nested quantifiers are not allowed");
+                case ANY:
+                    res = any<Iterator>(begin, any_begin, cur, scur);
+                    break;
+                default:
+                    res = cur == scur;
+                    break;
                 }
-                stack.set_len(any_idx + 1);
-            }
-            else
-            { // match the next character until we don't match or we reach the max
-                for (; cnt <= max; ++cnt, in.pop(), cur = in.peek())
-                {
-                    if (scur == cur)
-                        continue;
+                if (!(test_flag(flags, NOT) ^ res))
                     return cnt >= min;
-                }
+                ++cnt, in.pop(), cur = in.peek();
             }
             return false;
         }
+
 #if __cplusplus >= 202002L
         /// for internal use, just a string_view for operator""_sex
         template <size_t N>
         struct NotAStringView
         {
-            char str[N]{};
-            constexpr NotAStringView(char const (&str)[N])
+            const char str[N - 1]{};
+            constexpr NotAStringView(const char (&str)[N])
             {
-                for (size_t i = 0; i < N; ++i)
+                for (size_t i = 0; i < N - 1; ++i)
                     this->str[i] = str[i];
             }
-            inline constexpr std::string_view to_string_view() const { return std::string_view(str, N); }
+            inline constexpr std::string_view to_string_view() const { return std::string_view(str, N - 1); }
         };
 #endif
+    } // namespace internal
+
+    /// for internal use, parse expression into a container,
+    ///
+    /// container MUST have capacity of at least (`expression.size() + 1`)
+    ///
+    /// returns an iterator to the end of the filled portion of the container
+    template <typename Iterator>
+    constexpr Iterator parse(const std::string_view &x, Iterator begin)
+    {
+        using namespace internal;
+        static_assert(is_uchar_iterator<Iterator>::value, "simplex::parse() Iterator must be a pointer-like iterator of unsigned char");
+        const Iterator _begin = begin;
+        size_t xi{0};
+        uchar c{0};
+        for (; xi < x.size(); ++xi, ++begin)
+        {
+            c = x[xi];
+            switch (c)
+            {
+            case '\\':
+                *begin = x[++xi];
+                break;
+                // case FLAG: fallthrough...
+            case '!':
+                switch (c)
+                {
+                case '!':
+                    *begin |= NOT;
+                    break;
+                }
+                for (c = x[xi + 1];; c = x[++xi + 1])
+                {
+                    switch (c)
+                    {
+                    case '!':
+                        *begin |= NOT;
+                        continue;
+                    }
+                    break;
+                }
+                break;
+            case '*':
+                *begin = ZERO_OR_MORE;
+                break;
+            case '+':
+                *begin = ONE_OR_MORE;
+                break;
+            case '?':
+                *begin = ZERO_OR_ONE;
+                break;
+            case '{':
+            {
+                *begin = QUANTIFY;
+                uchar digits[3]{};
+                size_t i = 0;
+                for (c = x[++xi]; i < 3 && c >= '0' && c <= '9'; ++i, c = x[++xi])
+                    digits[i] = c;
+                if (c != ',')
+                    throw std::logic_error("malformed simplex quantifier, exptected ','");
+                *++begin = (i == 0 ? '\x00' : stouc(digits, i));
+                i = 0;
+                for (c = x[++xi]; i < 3 && c >= '0' && c <= '9'; ++i, c = x[++xi])
+                    digits[i] = c;
+                if (c != '}')
+                    throw std::logic_error("malformed simplex quantifier, exptected '}'");
+                *++begin = (i == 0 ? '\xFF' : stouc(digits, i));
+                continue;
+            }
+            case '[':
+            {
+                *begin = ANY;
+                c = x[++xi];
+                for (; c == '-'; c = x[++xi])
+                {
+                    *++begin = RANGE;
+                    if (x[++xi] == ']')
+                        throw std::logic_error("malformed simplex range, ']' must be escaped within a range");
+                    *++begin = x[xi] == '\\' ? x[++xi] : x[xi];
+                    if (x[++xi] == ']')
+                        throw std::logic_error("malformed simplex range, ']' must be escaped within a range");
+                    *++begin = x[xi] == '\\' ? x[++xi] : x[xi];
+                }
+                for (; c != ']'; c = x[++xi])
+                {
+                    *++begin = x[xi] == '\\' ? x[++xi] : x[xi];
+                }
+                *++begin = END_ANY;
+                continue;
+            }
+            default:
+                *begin = c;
+                continue;
+            }
+        }
+        *begin = END;
+        ptrdiff_t len = begin - _begin;
+        bool unterminated_quantify = len > 3 && *(begin - 3) == QUANTIFY;
+        bool unterminated_flag = len > 1 && *(begin - 1) == NOT;
+        if (unterminated_quantify || unterminated_flag)
+            throw std::logic_error("unterminated simplex operator");
+        return ++begin;
     }
 
-    /// a parsed simplex expression that can be used to match against an input stream with match()
+    /// match a simplex expression against an input stream
+    template <typename Iterator, typename T>
+    bool matches(Iterator begin, Input<T> &in)
+    {
+        using namespace internal;
+        static_assert(is_uchar_iterator<Iterator>::value, "simplex::match() Iterator must be a pointer-like iterator of unsigned char");
+        Iterator any_begin = begin;
+        uchar cur = in.peek(), scur = *begin, flags{0};
+        bool res;
+        for (; scur != END; scur = *++begin)
+        {
+            switch (scur)
+            {
+            // case FLAGS: fallthrough...
+            case NOT:
+                // flags only set the next matching unit
+                flags |= scur & uchar(0x7F);
+                continue;
+            case QUANTIFY:
+            {
+                uchar min = *++begin, max = *++begin;
+                res = quantify<Iterator, T>(begin, any_begin, in, cur, scur, min, max);
+                break;
+            }
+            case ZERO_OR_MORE:
+                res = quantify<Iterator, T>(begin, any_begin, in, cur, scur, 0, QUANTIFY_INF);
+                break;
+            case ONE_OR_MORE:
+                res = quantify<Iterator, T>(begin, any_begin, in, cur, scur, 1, QUANTIFY_INF);
+                break;
+            case ZERO_OR_ONE:
+                res = quantify<Iterator, T>(begin, any_begin, in, cur, scur, 0, 1);
+                break;
+            case ANY:
+                res = any<Iterator>(begin, any_begin, cur, scur);
+                if (!(test_flag(flags, NOT) ^ res))
+                    return false;
+                while (*any_begin != END_ANY)
+                    ++any_begin;
+                begin = any_begin;
+                in.pop(), cur = in.peek(), flags = 0;
+                continue;
+            default:
+                res = cur == scur, in.pop(), cur = in.peek();
+                break;
+            }
+            if (!(test_flag(flags, NOT) ^ res))
+                return false;
+            if (any_begin > begin)
+            {
+                while (*any_begin != END_ANY)
+                    ++any_begin;
+                begin = any_begin;
+            }
+            flags = 0;
+        }
+        // we reached the end of the expression, we do not check for any remaining input
+        return true;
+    }
+
     template <size_t N>
+    /// a contexpr-parsed simplex expression that can be used to match against an input stream with matches()
     class Simplex
     {
-        Stack<N> stack;
+        std::array<uchar, N> arr{};
 
     public:
         constexpr Simplex() = delete;
         constexpr Simplex<N> &operator=(const Simplex<N> &) = delete;
-        /// for internal use, create a simplex matcher with a parsed expression's operator stack
-        explicit constexpr Simplex(const std::array<uchar, N> &stack) : stack(stack) {}
-        /// for internal use, create a simplex matcher with a parsed expression's operator stack
-        explicit constexpr Simplex(std::array<uchar, N> &&stack) : stack(std::move(stack)) {}
+        constexpr Simplex(const std::string_view &expr)
+        {
+            if (expr.size() + 1 > N)
+                throw std::logic_error("simplex expression too large for Simplex container");
+            parse(expr, arr.begin());
+        }
         /// match a simplex expression against an input stream
         template <typename T>
-        bool match(Input<T> &in)
+        inline bool matches(Input<T> &in) const
         {
-            // current stack index and "any" index
-            size_t any_idx{stack.size()};
-            // current input character and stack character
-            uchar cur{in.peek()}, scur{stack.pop()};
-            uchar flags = 0;
-            uint8_t min = 1, max = 1;
-            bool b;
-            for (; !stack.empty(); scur = stack.pop())
-            {
-                if (scur > (uchar)0x80) // 0x80 is the boundary between parsed operators and literals
-                {
-                    // set flags
-                    if (scur <= (uchar)0x87) // (f=flag) 1xxx xfff, so 0x81 <= flags <= 0x87
-                    {
-                        flags = scur & (uchar)0x7F; // clear the top bit so we only have the flags
-                        scur = stack.pop();
-                    }
-                    // set quantifier
-                    if (scur == internal::QUANTIFY)
-                    { // quantified
-                        min = stack.pop();
-                        max = stack.pop();
-                        scur = stack.pop();
-                        b = internal::quantify<T, N>(in, min, max, stack, any_idx, cur, scur);
-                        b = (flags & (uint8_t)internal::NOT) ? !b : b;
-                        if (!b)
-                            return false;
-                        flags = 0;
-                        continue;
-                    }
-                    // not quantified
-                    if (scur == internal::ANY)
-                    {
-                        scur = stack.pop();
-                        b = internal::any<N>(stack, any_idx, cur, scur);
-                        while (stack[any_idx] != internal::END_ANY)
-                            --any_idx;
-                        stack.set_len(any_idx);
-                    }
-                    else
-                    {
-                        b = cur == scur;
-                    }
-                    b = (flags & (uint8_t)internal::NOT) ? !b : b;
-                    if (!b)
-                        return false;
-                    in.pop(), cur = in.peek(), flags = 0;
-                    continue;
-                }
-                // optimized for no flags or quantifiers
-                if (cur != scur)
-                    return false;
-                in.pop(), cur = in.peek();
-            }
-            // we reached the end of the expression, we do not check for any remaining input
-            return true;
+            return simplex::matches(arr.begin(), in);
         }
     };
-
-    /// parse a simplex expression
-    template <const std::string_view &expr, size_t idx = 0, internal::ParseState::S state = internal::ParseState::NORMAL, uchar... stack>
-    inline constexpr auto parse()
-    {
-        // should never happen because string_view indexing throws, but just in case...
-        static_assert(idx <= expr.size(), "simplex expression parsing index out of bounds, this is a bug please report it");
-        if constexpr (idx == expr.size())
-        { // finished parsing, validating...
-            constexpr size_t sz = sizeof...(stack);
-            constexpr std::array<uchar, sz> arr{stack...};
-            constexpr bool is_terminated = state == internal::ParseState::NORMAL && (sz < 3 || arr[2] != internal::QUANTIFY) && (sz < 1 || (arr[0] < (uchar)0x80 || arr[0] == internal::END_ANY));
-            static_assert(is_terminated, "simplex unterminated operator sequence");
-            return Simplex<sz>(arr);
-        }
-        else
-        { // parse the next operator/character
-            constexpr internal::ParseState next_state = parse_step(expr, idx, state);
-            return parse<expr, next_state.idx, next_state.state, next_state.res, stack...>();
-        }
-    }
 }; // namespace simplex
 
 #if __cplusplus >= 202002L
-template <::simplex::internal::NotAStringView x>
-inline auto operator""_sex()
+template <::simplex::internal::NotAStringView _x>
+inline constexpr auto operator""_Sex()
 {
-    static constexpr ::std::string_view sv{x.to_string_view()};
-    constexpr auto matcher = ::simplex::parse<sv>();
+    constexpr ::std::string_view x{_x.to_string_view()};
+    constexpr auto matcher = ::simplex::Simplex<x.size() + 1>(x);
     return matcher;
 }
 #endif
