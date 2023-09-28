@@ -3,74 +3,52 @@
  * @copyright
  * Copyright 2023 Lance Warden.
  * Licensed under MIT or Apache 2.0 License, see LICENSE-MIT or LICENSE-APACHE for details.
- * @brief A simple, comptime-parsed, stack-based, one-character lookahead regex. (C++17 and later)
+ * @brief A simple, comptime-parsed, one-character lookahead regex (C++17).
  */
 #ifndef SIMPLEX_HPP
 #define SIMPLEX_HPP
-#define QUANTIFY_MAX 0xFE
-#define QUANTIFY_INF 0xFF
+#define SIMPLEX_QUANTIFY_MAX 0xFE
+#define SIMPLEX_QUANTIFY_INF 0xFF
 
 #include <cstdint>
+#include <iterator>
 #include <stdexcept>
 #include <string_view>
-#include <array>
 
 #ifndef SIMPLEX_INF
 #define SIMPLEX_INF 0x0FFF
 #endif
-#define Sex(expr) ([]() constexpr { \
-    using namespace ::std::string_view_literals; \
-    constexpr ::std::string_view x = expr##sv; \
-    constexpr auto matcher = ::simplex::Simplex<x.size() + 1>(x); \
-    return matcher; })()
 
-/**
- * @brief A simple, comptime-parsed, stack-based, one-character lookahead regex. (Minimum Supported Version C++17)
- * @attention only basic ascii string literal expressions are supported and expression validation is not guaranteed
- */
+/// @brief A simple, comptime-parsed,, one-character lookahead regex (C++17).
+/// @attention only basic ascii string literal expressions are supported (0x00-0x7F) and expression validation is not guaranteed
 namespace simplex
 {
-    using uchar = unsigned char;
-
-    /// simplex runtime stack-based input interface
-    template <typename T>
-    struct Input
-    {
-        inline void pop()
-        {
-            static_assert(std::is_member_function_pointer<decltype(&T::pop)>::value, "simplex::Input T must have a pop() method");
-            static_cast<T *>(this)->pop();
-        }
-        inline uchar peek()
-        {
-            static_assert(std::is_member_function_pointer<decltype(&T::peek)>::value, "simplex::Input T must have a peek() method");
-            return static_cast<T *>(this)->peek();
-        }
-    };
-
+    /// @brief internal namespace for simplex
     namespace internal
     {
-        template <typename Iterator>
-        struct is_uchar_iterator : public std::bool_constant<
-                                       std::is_same<typename std::iterator_traits<Iterator>::value_type, uchar>::value &&
-                                       std::is_same<typename std::iterator_traits<Iterator>::difference_type, ptrdiff_t>::value &&
-                                       std::is_base_of<std::random_access_iterator_tag, typename std::iterator_traits<Iterator>::iterator_category>::value &&
-                                       std::is_copy_assignable<Iterator>::value>
-        {
-        };
+        using uchar = unsigned char;
+
+        /// @brief check if Container satisfies ContiguousContainer and has a value_type of char
+        /// @tparam Container the container type to check
+        template <typename Container>
+        constexpr bool is_contiguous_char_container = std::is_same<typename std::remove_reference_t<decltype(*std::begin(std::declval<Container &>()))>, char>::value && std::is_base_of<std::random_access_iterator_tag, typename std::iterator_traits<decltype(std::begin(std::declval<Container &>()))>::iterator_category>::value;
 
         enum : uchar
         {
-            // reserve 0x81 - 0x87 for flags (1000 0xxx)
+            /// @brief NOT op flag, invert the next matching unit
             NOT = 0x81,
-            QUANTIFY = 0x88,
+            /// @brief QUANTIFY op code, next matching unit is quantified
+            QUANTIFY,
+            /// @brief ZERO_OR_MORE op code, next matching unit is quantified as zero or more
             ZERO_OR_MORE,
+            /// @brief ONE_OR_MORE op code, next matching unit is quantified as one or more
             ONE_OR_MORE,
+            /// @brief ZERO_OR_ONE op code, next matching unit is quantified as zero or one
             ZERO_OR_ONE,
+            /// @brief ANY op code, next matching unit is a group of characters
             ANY,
+            /// @brief RANGE op code, next matching unit is a range of characters
             RANGE,
-            END_ANY,
-            END,
         };
 
         inline constexpr bool test_flag(const uchar flags, uchar flag)
@@ -89,278 +67,314 @@ namespace simplex
             case 3:
             {
                 uint16_t res = uint16_t(stack[0] - '0') * 100 + uint16_t(stack[1] - '0') * 10 + uint16_t(stack[2] - '0');
-                if (res > uint16_t(QUANTIFY_MAX))
-                    throw std::logic_error("malformed simplex quantifier, maximum bound is 254");
-                return (uchar)res;
+                if (res > uint16_t(SIMPLEX_QUANTIFY_MAX))
+                    throw std::logic_error("simplex::parse(): malformed quantifier, maximum bound is 254");
+                return uchar(res);
             }
+            default:
+                throw std::logic_error("simplex::parse(): malformed quantifier");
             }
         }
 
-        /// for internal use, matching on any group
-        template <typename Iterator>
-        bool any(const Iterator &begin, Iterator &any_begin, const uchar cur, uchar scur)
-        { // assume we have already read ANY operator
-            any_begin = begin;
-            scur = *++any_begin;
-            for (; scur == RANGE; scur = *++any_begin)
+        bool any(std::string_view expr, const uchar cur)
+        { // assume expr is the actual group
+            size_t pos{0};
+            for (uchar scur = expr[pos]; scur == RANGE; scur = expr[++pos])
             { // ranges are always two characters, otherwise it's malformed
-                if (cur >= *++any_begin && cur <= *++any_begin)
-                    return true;
+                if (cur >= expr[++pos] && cur <= expr[++pos])
+                    return pos;
             }
-            for (; scur != END_ANY; scur = *++any_begin)
-            { // everything else is a literal until END_ANY, if a range follows it's ignored
-                if (cur == scur)
-                    return true;
-            }
-            return false;
+            return expr.find(char(cur), pos) != std::string_view::npos;
         }
 
-        /// for internal use, matching on a quantified group
-        template <typename Iterator, typename T>
-        bool quantify(Iterator &begin, Iterator &any_begin, Input<T> &in, uchar &cur, uchar &scur, const uint16_t min, uint16_t max)
+        template <typename Iter>
+        bool quantify(std::string_view expr, Iter &begin, const Iter &end, size_t &pos, uchar cur, const uint16_t min, const uint16_t max)
         { // assume we have already read QUANTIFY operator
-            scur = *++begin;
-            uint16_t cnt{0}, flags{0};
+            size_t new_pos = ++pos;
+            uint16_t cnt{0};
+            uchar flags{0}, any_len{0}, scur = expr[pos];
             bool res{false};
-            if (max == uint16_t(QUANTIFY_INF))
-                max = uint16_t(SIMPLEX_INF);
-            while (cnt <= max)
+            while (cnt <= max && begin != end)
             {
                 switch (scur)
                 {
                 // case FLAGS: fallthrough...
                 case NOT:
-                    flags |= scur & uchar(0x7F), scur = *++begin;
+                    flags |= scur & uchar(0x7F), scur = expr[++pos], new_pos = pos;
                     continue;
                 case QUANTIFY:
                 case ZERO_OR_MORE:
                 case ONE_OR_MORE:
                 case ZERO_OR_ONE:
-                    throw std::logic_error("malformed simplex quantifier, nested quantifiers are not allowed");
+                    throw std::logic_error("simplex::matches(): malformed quantifier, nested quantifiers are not allowed");
                 case ANY:
-                    res = any<Iterator>(begin, any_begin, cur, scur);
+                    any_len = expr[pos + 1];
+                    res = any(expr.substr(pos + 2, any_len), cur);
+                    new_pos = pos + any_len + 1;
                     break;
                 default:
                     res = cur == scur;
                     break;
                 }
                 if (!(test_flag(flags, NOT) ^ res))
-                    return cnt >= min;
-                ++cnt, in.pop(), cur = in.peek();
+                    return (pos = new_pos, cnt >= min);
+                ++cnt, cur = *++begin;
             }
-            return false;
+            return (pos = new_pos, cnt >= min && cnt <= max);
         }
-
-#if __cplusplus >= 202002L
-        /// for internal use, just a string_view for operator""_sex
-        template <size_t N>
-        struct NotAStringView
-        {
-            const char str[N - 1]{};
-            constexpr NotAStringView(const char (&str)[N])
-            {
-                for (size_t i = 0; i < N - 1; ++i)
-                    this->str[i] = str[i];
-            }
-            inline constexpr std::string_view to_string_view() const { return std::string_view(str, N - 1); }
-        };
-#endif
     } // namespace internal
 
-    /// for internal use, parse expression into a container,
-    ///
-    /// container MUST have capacity of at least (`expression.size() + 1`)
-    ///
-    /// returns an iterator to the end of the filled portion of the container
-    template <typename Iterator>
-    constexpr Iterator parse(const std::string_view &x, Iterator begin)
+    /// @brief Parses a simplex expression and converts it to a string of internal codes.
+    /// @tparam Iter Iterator type of the container.
+    /// @param expr The simplex expression to parse.
+    /// @param begin Iterator pointing to the beginning of the container.
+    /// @param end Iterator pointing to the end of the container.
+    /// @return constexpr std::string_view The string of internal codes.
+    /// @throws std::logic_error If the expression is too large for the container, or if there is a syntax error in the expression.
+    /// @details This function converts a simplex expression to a string of internal codes that can be used by the Simplex engine.
+    /// The function iterates through the expression and converts each character to its corresponding internal code.
+    /// The resulting string of internal codes is returned as a std::string_view.
+    /// If the expression is too large for the container, or if there is a syntax error in the expression, a std::logic_error is thrown.
+    template <typename Iter>
+    constexpr std::string_view parse(std::string_view expr, Iter begin, const Iter end)
     {
+        static_assert(std::is_same<char, typename std::iterator_traits<Iter>::value_type>::value, "simplex::parse(): iterator::value_type must be char");
+        if (auto dist = std::distance(begin, end); 0 > dist || expr.size() > size_t(dist))
+            throw std::logic_error("simplex::parse(): expression too large for container");
         using namespace internal;
-        static_assert(is_uchar_iterator<Iterator>::value, "simplex::parse() Iterator must be a pointer-like iterator of unsigned char");
-        const Iterator _begin = begin;
         size_t xi{0};
         uchar c{0};
-        for (; xi < x.size(); ++xi, ++begin)
+        Iter p = begin;
+        for (; xi < expr.size(); ++xi, ++p)
         {
-            c = x[xi];
+            c = expr[xi];
             switch (c)
             {
             case '\\':
-                *begin = x[++xi];
+                *p = expr[++xi];
                 break;
-                // case FLAG: fallthrough...
             case '!':
                 switch (c)
                 {
                 case '!':
-                    *begin |= NOT;
+                    *p |= NOT;
                     break;
                 }
-                for (c = x[xi + 1];; c = x[++xi + 1])
+                for (c = expr[xi + 1];; c = expr[++xi + 1])
                 {
                     switch (c)
                     {
                     case '!':
-                        *begin |= NOT;
+                        *p |= NOT;
                         continue;
                     }
                     break;
                 }
                 break;
             case '*':
-                *begin = ZERO_OR_MORE;
+                *p = ZERO_OR_MORE;
                 break;
             case '+':
-                *begin = ONE_OR_MORE;
+                *p = ONE_OR_MORE;
                 break;
             case '?':
-                *begin = ZERO_OR_ONE;
+                *p = ZERO_OR_ONE;
                 break;
             case '{':
             {
-                *begin = QUANTIFY;
+                *p = QUANTIFY;
                 uchar digits[3]{};
                 size_t i = 0;
-                for (c = x[++xi]; i < 3 && c >= '0' && c <= '9'; ++i, c = x[++xi])
+                for (c = expr[++xi]; i < 3 && c >= '0' && c <= '9'; ++i, c = expr[++xi])
                     digits[i] = c;
                 if (c != ',')
-                    throw std::logic_error("malformed simplex quantifier, exptected ','");
-                *++begin = (i == 0 ? '\x00' : stouc(digits, i));
+                    throw std::logic_error("simplex::parse(): malformed quantifier, exptected ','");
+                *++p = (i == 0 ? uchar(0) : stouc(digits, i));
                 i = 0;
-                for (c = x[++xi]; i < 3 && c >= '0' && c <= '9'; ++i, c = x[++xi])
+                for (c = expr[++xi]; i < 3 && c >= '0' && c <= '9'; ++i, c = expr[++xi])
                     digits[i] = c;
                 if (c != '}')
-                    throw std::logic_error("malformed simplex quantifier, exptected '}'");
-                *++begin = (i == 0 ? '\xFF' : stouc(digits, i));
+                    throw std::logic_error("simplex::parse(): malformed quantifier, exptected '}'");
+                *++p = (i == 0 ? uchar(SIMPLEX_QUANTIFY_INF) : stouc(digits, i));
                 continue;
             }
             case '[':
             {
-                *begin = ANY;
-                c = x[++xi];
-                for (; c == '-'; c = x[++xi])
+                *p = ANY;
+                Iter lp = ++p;
+                c = expr[++xi];
+                for (; c == '-'; c = expr[++xi])
                 {
-                    *++begin = RANGE;
-                    if (x[++xi] == ']')
-                        throw std::logic_error("malformed simplex range, ']' must be escaped within a range");
-                    *++begin = x[xi] == '\\' ? x[++xi] : x[xi];
-                    if (x[++xi] == ']')
-                        throw std::logic_error("malformed simplex range, ']' must be escaped within a range");
-                    *++begin = x[xi] == '\\' ? x[++xi] : x[xi];
+                    *++p = RANGE;
+                    if (expr[++xi] == ']')
+                        throw std::logic_error("simplex::parse(): malformed range, ']' must be escaped within a range");
+                    *++p = expr[xi] == '\\' ? expr[++xi] : expr[xi];
+                    if (expr[++xi] == ']')
+                        throw std::logic_error("simplex::parse(): malformed range, ']' must be escaped within a range");
+                    *++p = expr[xi] == '\\' ? expr[++xi] : expr[xi];
                 }
-                for (; c != ']'; c = x[++xi])
+                for (; c != ']'; c = expr[++xi])
                 {
-                    *++begin = x[xi] == '\\' ? x[++xi] : x[xi];
+                    *++p = expr[xi] == '\\' ? expr[++xi] : expr[xi];
                 }
-                *++begin = END_ANY;
+                auto dist = std::distance(lp, p);
+                if (255 < dist || 0 > dist)
+                    throw std::logic_error("simplex::parse(): malformed any range, range must be 0 to 255 characters");
+                *lp = uchar(dist); // store length of any group, max 255
                 continue;
             }
             default:
-                *begin = c;
+                *p = c;
                 continue;
             }
         }
-        *begin = END;
-        ptrdiff_t len = begin - _begin;
-        bool unterminated_quantify = len > 3 && *(begin - 3) == QUANTIFY;
-        bool unterminated_flag = len > 1 && *(begin - 1) == NOT;
+        auto len = std::distance(begin, p);
+        bool unterminated_quantify = len > 3 && uchar(*(p - 3)) == QUANTIFY;
+        bool unterminated_flag = len > 1 && uchar(*(p - 1)) == NOT;
         if (unterminated_quantify || unterminated_flag)
-            throw std::logic_error("unterminated simplex operator");
-        return ++begin;
+            throw std::logic_error("simplex::parse(): unterminated simplex operator");
+        return std::string_view(&(*begin), size_t(len));
     }
 
-    /// match a simplex expression against an input stream
-    template <typename Iterator, typename T>
-    bool matches(Iterator begin, Input<T> &in)
+    /// @brief Matches a parsed simplex expression with a range of iterators.
+    /// @tparam Iter The type of the iterator.
+    /// @param expr The parsed simplex expression to match.
+    /// @param begin The beginning of the range of iterators.
+    /// @param end The end of the range of iterators.
+    /// @return true If the expression matches the range of iterators.
+    /// @return false If the expression does not match the range of iterators.
+    template <typename Iter>
+    bool matches(std::string_view expr, Iter begin, const Iter end)
     {
         using namespace internal;
-        static_assert(is_uchar_iterator<Iterator>::value, "simplex::match() Iterator must be a pointer-like iterator of unsigned char");
-        Iterator any_begin = begin;
-        uchar cur = in.peek(), scur = *begin, flags{0};
+        static_assert(std::is_base_of<std::forward_iterator_tag, typename std::iterator_traits<Iter>::iterator_category>::value && std::is_same<char, typename std::iterator_traits<Iter>::value_type>::value, "simplex::match() iterator must be a forward iterator over chars");
+        size_t pos{0};
+        uint16_t min, max;
+        uchar cur, scur, any_len, flags{0};
         bool res;
-        for (; scur != END; scur = *++begin)
+        for (; pos < expr.size() && begin != end; ++pos)
         {
+            cur = *begin, scur = expr[pos];
             switch (scur)
             {
-            // case FLAGS: fallthrough...
             case NOT:
                 // flags only set the next matching unit
                 flags |= scur & uchar(0x7F);
                 continue;
             case QUANTIFY:
-            {
-                uchar min = *++begin, max = *++begin;
-                res = quantify<Iterator, T>(begin, any_begin, in, cur, scur, min, max);
+                min = expr[++pos], max = expr[++pos];
+                res = quantify<Iter>(expr, begin, end, pos, cur, min, max == SIMPLEX_QUANTIFY_INF ? SIMPLEX_INF : max);
                 break;
-            }
             case ZERO_OR_MORE:
-                res = quantify<Iterator, T>(begin, any_begin, in, cur, scur, 0, QUANTIFY_INF);
+                res = quantify<Iter>(expr, begin, end, pos, cur, 0, SIMPLEX_INF);
                 break;
             case ONE_OR_MORE:
-                res = quantify<Iterator, T>(begin, any_begin, in, cur, scur, 1, QUANTIFY_INF);
+                res = quantify<Iter>(expr, begin, end, pos, cur, 1, SIMPLEX_INF);
                 break;
             case ZERO_OR_ONE:
-                res = quantify<Iterator, T>(begin, any_begin, in, cur, scur, 0, 1);
+                res = quantify<Iter>(expr, begin, end, pos, cur, 0, 1);
                 break;
             case ANY:
-                res = any<Iterator>(begin, any_begin, cur, scur);
-                if (!(test_flag(flags, NOT) ^ res))
-                    return false;
-                while (*any_begin != END_ANY)
-                    ++any_begin;
-                begin = any_begin;
-                in.pop(), cur = in.peek(), flags = 0;
-                continue;
+                any_len = expr[pos + 1];
+                res = any(expr.substr(pos + 2, any_len), cur);
+                pos += any_len + 1, ++begin;
+                break;
             default:
-                res = cur == scur, in.pop(), cur = in.peek();
+                res = cur == scur, ++begin;
                 break;
             }
             if (!(test_flag(flags, NOT) ^ res))
                 return false;
-            if (any_begin > begin)
-            {
-                while (*any_begin != END_ANY)
-                    ++any_begin;
-                begin = any_begin;
-            }
             flags = 0;
         }
         // we reached the end of the expression, we do not check for any remaining input
-        return true;
+        return pos == expr.size();
     }
 
-    template <size_t N>
-    /// a contexpr-parsed simplex expression that can be used to match against an input stream with matches()
-    class Simplex
+    /// @brief Matches a parsed simplex expression with a string_view.
+    /// @param expr The parsed simplex expression to match.
+    /// @param input The string_view to match against.
+    /// @return true If the expression matches the input.
+    /// @return false If the expression does not match the input.
+    bool matches(std::string_view expr, std::string_view input)
     {
-        std::array<uchar, N> arr{};
-
-    public:
-        constexpr Simplex() = delete;
-        constexpr Simplex<N> &operator=(const Simplex<N> &) = delete;
-        constexpr Simplex(const std::string_view &expr)
-        {
-            if (expr.size() + 1 > N)
-                throw std::logic_error("simplex expression too large for Simplex container");
-            parse(expr, arr.begin());
-        }
-        /// match a simplex expression against an input stream
-        template <typename T>
-        inline bool matches(Input<T> &in) const
-        {
-            return simplex::matches(arr.begin(), in);
-        }
-    };
+        return matches<std::string_view::iterator>(expr, input.begin(), input.end());
+    }
 }; // namespace simplex
 
-#if __cplusplus >= 202002L
-template <::simplex::internal::NotAStringView _x>
-inline constexpr auto operator""_Sex()
+/// @brief A contexpr-parsed simplex expression that can be used to match against an input with `Simplex::matches()`
+/// @tparam Container a contiguous container with value_type char
+///
+/// @example Construct a Simplex expression from a string literal
+/// @code
+/// constexpr Simplex s("a*[bc]d");
+/// static_assert(s.matches("abbbcd"));
+/// @endcode
+template <typename Container>
+class Simplex
 {
-    constexpr ::std::string_view x{_x.to_string_view()};
-    constexpr auto matcher = ::simplex::Simplex<x.size() + 1>(x);
-    return matcher;
-}
-#endif
+    static_assert(simplex::internal::is_contiguous_char_container<Container>, "Simplex Container must satisfy ContiguousContainer with value_type char");
+
+    Container buf;
+    size_t len{0};
+
+public:
+    typedef char value_type;
+    typedef Container container_type;
+
+    constexpr Simplex() = delete;
+    constexpr Simplex<Container> &operator=(const Simplex<Container> &) noexcept = default;
+
+    /// @brief Construct a Simplex expression from a string literal
+    /// @tparam N the size of the string literal
+    /// @param expr the string literal to parse
+    template <size_t N>
+    constexpr Simplex(const char (&expr)[N]) : buf(), len(simplex::parse(std::string_view(expr, N - 1), std::begin(buf), std::end(buf)).size())
+    {
+        static_assert(std::is_same<Container, char[N - 1]>::value, "Simplex container must be char[N - 1] when constructing via Simplex(const char (&)[N])");
+    }
+
+    /// @brief Construct a Simplex expression from a string_view
+    /// @tparam ...Args the types of the arguments to pass to the container constructor
+    /// @param expr the string_view to parse
+    /// @param ...args the arguments to pass to the container constructor
+    template <typename... Args>
+    constexpr Simplex(std::string_view expr, Args... args) : buf(args...)
+    {
+        if (expr.size() > std::size(buf))
+            throw std::logic_error("simplex expression too large for Simplex container");
+        len = simplex::parse(expr, std::begin(buf), std::end(buf)).size();
+    }
+
+    /// @brief Get a const reference to the inner buffer used to store the parsed expression
+    inline constexpr const Container &data() const { return buf; }
+
+    /// @brief Get the parsed expression
+    inline constexpr std::string_view expr() const { return std::string_view(&(*std::begin(buf)), len); }
+
+    /// @brief Match against a range of iterators.
+    /// @tparam Iter The type of the iterator.
+    /// @param begin The beginning of the range of iterators.
+    /// @param end The end of the range of iterators.
+    /// @return true If the range of iterators matches.
+    /// @return false If the range of iterators does not match.
+    template <typename Iter>
+    inline bool matches(Iter begin, const Iter end) const
+    {
+        return simplex::matches<Iter>(this->expr(), begin, end);
+    }
+
+    /// @brief Match against a string_view.
+    /// @param input The string_view to match against.
+    /// @return true If the input matches.
+    /// @return false If the input does not match.
+    inline bool matches(std::string_view input) const
+    {
+        return simplex::matches(this->expr(), input);
+    }
+};
+
+template <size_t N>
+Simplex(const char (&expr)[N]) -> Simplex<char[N - 1]>;
 
 #endif // SIMPLEX_HPP
